@@ -528,27 +528,50 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
       }
 
       df.sd <- data.frame(numer.col.list, std.dev.list)
+      print('df.sd')
+      print(df.sd)
 
       whatif.feature.val <- vector('numeric')
       whatif.pred.result <- vector('numeric')
 
+      print(head(self$dfTest))
+
       # for classification
-      for (i in nrow(self$dfTest)) {
+      for (i in 1:2) { # nrow(self$dfTest)) {
         # 1) subtract 0.5 sd from paticular row value for each row in df.sd
-        for (j in nrow(df.sd)) {
-          numer.col.temp <- df.sd[j,1]
+        for (j in 1:nrow(df.sd)) {
+          numer.col.temp <- df.sd[[j,1]]
           print('numer.col.temp')
           print(numer.col.temp)
-          sd.temp <- df.sd[j,2]
+          print('end numer col')
+          sd.temp <- df.sd[[j,2]]
           print('sd.temp')
-          print(numer.col.temp)
-          self$dfTest[[i,numer.col.temp]] <- self$dfTest[[i,numer.col.temp]] - sd.temp
-          whatif.pred.result <- predict(fit,
-                                        newdata = self$dfTest,
-                                        type = "response")
+          print(sd.temp)
+          print('numer.col.temp min')
+          print(self$dfTest[[numer.col.temp]])
+          print(min(self$dfTest[[numer.col.temp]]))
+          # Don't go below col min
+          whatif.feature.val.temp1 <- self$dfTest[[i,numer.col.temp]] - sd.temp
+          whatif.feature.val.temp2 <- ifelse(whatif.feature.val.temp1 >= min(self$dfTest[[numer.col.temp]]),
+                                            whatif.feature.val.temp1,
+                                            self$dfTest[[i,numer.col.temp]])
+          #whatif.feature.val <- ifelse(self$dfTest[[i,numer.col.temp]] - sd.temp
+          whatif.feature.val <- c(whatif.feature.val,whatif.feature.val.temp2)
+
+          self$dfTest[[i,numer.col.temp]] <- whatif.feature.val
+          whatif.pred.result <- c(whatif.pred.result,predict(fit,
+                                                             newdata = self$dfTest,
+                                                             type = "response"))
+
 
         }
       }
+
+      print('Out of for loops')
+      print('whatif.feature.val')
+      print(whatif.feature.val)
+      print('whatif.pred.result')
+      print(whatif.pred.result)
 
       stop("End here")
 
