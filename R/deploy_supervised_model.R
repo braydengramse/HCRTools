@@ -162,7 +162,6 @@ source('R/common.R')
 DeploySupervisedModel <- R6Class("DeploySupervisedModel",
   public = list(
 
-    df = NA,
     grain.col = NA,
     window.col = NA,
     use.saved.model = NA,
@@ -341,10 +340,11 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
       # Pass raw (un-imputed) dfTest to object, so important factors aren't null
       self$dfTestRAW <- dfTest[, !(names(dfTest) %in% c(predicted.col))]
 
-      if (isTRUE(debug)) {
-        print('Raw test set (sans imputation) created for mult with coeffs')
-        print(str(self$dfTestRAW))
-      }
+      # Can remove when new guidance is working
+      # if (isTRUE(debug)) {
+      #   print('Raw test set (sans imputation) created for mult with coeffs')
+      #   print(str(self$dfTestRAW))
+      # }
 
       # Always do imputation on all of test set (since now no NAs in pred.col)
       dfTest[] <- lapply(dfTest, ImputeColumn)
@@ -367,6 +367,7 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
     }, # End intialize method (e.g., constructor)
 
     deploy = function(model,
+                      improvement.cols,
                       cores = 4,
                       sqlcnxn,
                       dest.schema.table,
@@ -379,7 +380,6 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
     sqlcnxn <- odbcDriverConnect(sqlcnxn)
 
       if (isTRUE(self$use.saved.model)) {
-        load("rmodel_var_import.rda")  # Produces fit.logit object
         load("rmodel_probability.rda") # Produces fit object (for probability)
       } else {
           if (cores > 1) {
@@ -393,27 +393,11 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
             print(str(self$dfTrain))
           }
 
-          # Start default logit (for var importance)
-          if (self$type == 'classification') {
-            fit.logit = glm(
-              as.formula(paste(self$predicted.col, '.', sep = " ~ ")),
-              data = self$dfTrain,
-              family = binomial(link = "logit"),
-              metric = "ROC",
-              control = list(maxit = 10000),
-              trControl = trainControl(classProbs = TRUE,
-                                       summaryFunction = twoClassSummary))
-
-          } else if (self$type == 'regression') {
-            fit.logit = glm(
-              as.formula(paste(self$predicted.col, '.', sep = " ~ ")),
-              data = self$dfTrain,
-              metric = "RMSE",
-              control = list(maxit = 10000))
-          }
+          # Set up multicore for model creation
           if (cores > 1) {
-            stopCluster(cl)
-            registerDoSEQ()
+            suppressMessages(library(doParallel))
+            cl <- makeCluster(cores)
+            registerDoParallel(cl)
           }
 
           # Check which model was chosen (for non-factor-ranking train work)
@@ -428,11 +412,6 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
                 rfmtry.temp <- rfmtry
             }
 
-            if (cores > 1) {
-                suppressMessages(library(doParallel))
-                cl <- makeCluster(cores)
-                registerDoParallel(cl)
-            }
             if (self$type == 'classification') {
 
               fit = ranger(
@@ -443,6 +422,10 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
                 write.forest = TRUE,
                 mtry = rfmtry.temp)
 
+              predictedVALStemp = predict(fit, data = self$dfTest)
+              predictedVALS <- predictedVALStemp$predictions[,2]
+              print('Probability predictions are based on random forest')
+
             } else if (self$type == 'regression') {
 
               fit = ranger(
@@ -451,79 +434,124 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
                 num.trees = trees,
                 write.forest = TRUE,
                 mtry = rfmtry.temp)
+
+              predictedVALStemp = predict(fit, data = self$dfTest)
+              predictedVALS <- predictedVALStemp$predictions
             }
+          } else {  # Start logit
+            if (self$type == 'classification') {
+              fit = glm(
+                as.formula(paste(self$predicted.col, '.', sep = " ~ ")),
+                data = self$dfTrain,
+                family = binomial(link = "logit"),
+                metric = "ROC",
+                control = list(maxit = 10000),
+                trControl = trainControl(classProbs = TRUE,
+                                         summaryFunction = twoClassSummary))
 
-              if (cores > 1) {
-                stopCluster(cl)
-                registerDoSEQ()
-              }
+              predictedVALS = predict(fit,
+                                      newdata = self$dfTest, type = "response")
+              print('Probability predictions are based on logistic')
 
-          } else {
-              fit = fit.logit # set to logit, if logit is chosen over rf
+            } else if (self$type == 'regression') {
+              fit = glm(
+                as.formula(paste(self$predicted.col, '.', sep = " ~ ")),
+                data = self$dfTrain,
+                metric = "RMSE",
+                control = list(maxit = 10000))
+
+              predictedVALS = predict(fit, newdata = self$dfTest)
+            }
           }
-      }
+          if (cores > 1) {
+            stopCluster(cl)
+            registerDoSEQ()
+          }
 
-      print('Details for proability model:')
-      print(fit)
+        # if (model == 'rf') {  #  these are probabilities
+        #    # predictedVALStemp = predict(fit, data = self$dfTest)
+        #    # predictedVALS <- predictedVALStemp$predictions[,2]
+        #    # print('Probability predictions are based on random forest')
+        #
+        # } else {              #  these are probabilities
+        #    # predictedVALS = predict(fit,
+        #    #                         newdata = self$dfTest, type = "response")
+        #    # print('Probability predictions are based on logistic')
+        # }
 
-      # Save models if specified
-      if (isTRUE(!self$use.saved.model)) {
-          save(fit.logit, file = "rmodel_var_import.rda")
-          save(fit, file = "rmodel_probability.rda")
-      }
-
-      # This isn't needed if formula interface is used in randomForest
-      self$dfTest[[self$predicted.col]] <- NULL
-
-      if (isTRUE(debug)) {
-        print('Test set before being used in predict(), after removing y')
-        print(str(self$dfTest))
-      }
-
-      if (self$type == 'classification') {
-        if (model == 'rf') {  #  these are probabilities
-           predictedVALStemp = predict(fit, data = self$dfTest)
-           predictedVALS <- predictedVALStemp$predictions[,2]
-           print('Probability predictions are based on random forest')
-
-        } else {              #  these are probabilities
-           predictedVALS = predict(fit,
-                                   newdata = self$dfTest, type = "response")
-           print('Probability predictions are based on logistic')
-        }
-
-        if (isTRUE(debug)) {
+        if (isTRUE(debug) && self$type == 'classification') {
             print(paste0('Rows in prob prediction: ', nrow(predictedVALS)))
             print('First 10 raw classification probability predictions')
             print(round(predictedVALS[1:10],2))
         }
 
-      } else if (self$type == 'regression') {  # this is in-kind prediction
-        if (model == 'rf') {
-            predictedVALStemp = predict(fit, data = self$dfTest)
-            predictedVALS <- predictedVALStemp$predictions
-        } else {
-          predictedVALS = predict(fit, newdata = self$dfTest)
-        }
+        # } else if (self$type == 'regression') {  # this is in-kind prediction
+        # if (model == 'rf') {
+        #     # predictedVALStemp = predict(fit, data = self$dfTest)
+        #     # predictedVALS <- predictedVALStemp$predictions
+        # } else {
+        #   # predictedVALS = predict(fit, newdata = self$dfTest)
+        # }
 
-        if (isTRUE(debug)) {
+        if (isTRUE(debug) && self$type == 'regression') {
             print(paste0('Rows in regression prediction: ',
                          length(predictedVALS)))
             print('First 10 raw regression predictions (with row # first)')
             print(round(predictedVALS[1:10],2))
         }
-
       }
 
-      # Do semi-manual calc to rank cols by order of importance
-      coefftemp <- fit.logit$coefficients
+      print('Train')
+      print(str(self$dfTrain))
 
-      if (isTRUE(debug)) {
-          print('Coefficients for the default logit (for ranking var import)')
-          print(coefftemp)
+      print('Test')
+      print(str(self$dfTest))
+
+      # reconstitue post-impute df
+      df_imputed <- rbind(self$dfTrain, self$dfTest)
+
+      # Start computations for outcome improvement guidance
+      # Pre-create empty vectors
+      numer.col.list <- vector('character')
+      std.dev.list <- vector('numeric')
+
+      # Create df with numer.col name and std dev
+      # TODO: add error handling around the user adding factor cols to list
+      # Note that factor cols are turned into dummies by this point
+      for (i in improvement.cols) {
+        if (is.numeric(self$dfTest[[i]])) {
+          numer.col.list <- c(numer.col.list, i)
+          std.dev.list <- c(std.dev.list, sd(df_imputed[[i]]))
+        } else {
+          print(paste("This column isn't numeric: ", i))
+        }
       }
 
-      coefficients <- coefftemp[2:length(coefftemp)] # drop intercept
+      df.sd <- data.frame(numer.col.list, std.dev.list)
+
+      whatif.feature.val <- vector('numeric')
+      whatif.pred.result <- vector('numeric')
+
+      # for classification
+      for (i in nrow(self$dfTest)) {
+        # 1) subtract 0.5 sd from paticular row value for each row in df.sd
+        for (j in nrow(df.sd)) {
+          numer.col.temp <- df.sd[j,1]
+          print('numer.col.temp')
+          print(numer.col.temp)
+          sd.temp <- df.sd[j,2]
+          print('sd.temp')
+          print(numer.col.temp)
+          self$dfTest[[i,numer.col.temp]] <- self$dfTest[[i,numer.col.temp]] - sd.temp
+          whatif.pred.result <- predict(fit,
+                                        newdata = self$dfTest,
+                                        type = "response")
+
+        }
+      }
+
+      stop("End here")
+
 
       # Apply multiplication of coeff across each row of test set
       # Remove y (label) so we do multiplication only on X (features)
@@ -534,24 +562,18 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
         print(str(self$dfTest))
       }
 
-      multiply_res <- sweep(self$dfTestRAW, 2, coefficients, `*`)
-
-      if (isTRUE(debug)) {
-        print('Data frame after multiplying raw vals by coeffs')
-        print(multiply_res[1:10,])
-      }
 
       # Calculate ordered factors of importance for each row's prediction
-      ordered.factors = t(sapply
-                          (1:nrow(multiply_res),
-                          function(i)
-                            colnames(multiply_res[order(multiply_res[i,],
-                                                        decreasing = TRUE)])))
+      # ordered.factors = t(sapply
+      #                     (1:nrow(multiply_res),
+      #                     function(i)
+      #                       colnames(multiply_res[order(multiply_res[i,],
+      #                                                   decreasing = TRUE)])))
 
-      if (isTRUE(debug)) {
-        print('Data frame after getting column importance ordered')
-        print(ordered.factors[1:10,])
-      }
+      # if (isTRUE(debug)) {
+      #   print('Data frame after getting column importance ordered')
+      #   print(ordered.factors[1:10,])
+      # }
 
       dtstamp = as.POSIXlt(Sys.time(), "GMT")
 
