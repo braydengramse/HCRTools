@@ -543,11 +543,13 @@ DeploySupervisedModel <- R6Class("DeploySupervisedModel",
           numer.col.temp <- df.sd[[j,1]]
           print('numer.col.temp')
           print(numer.col.temp)
-          print('end numer col')
           sd.temp <- df.sd[[j,2]]
           print('sd.temp')
           print(sd.temp)
           print('numer.col.temp min')
+          print('df_imputed')
+
+          print('dfTest')
           print(self$dfTest[[numer.col.temp]])
           print(min(self$dfTest[[numer.col.temp]]))
           # Don't go below col min
